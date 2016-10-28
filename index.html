@@ -1,0 +1,549 @@
+<html>
+  <head>
+    <title>SailRTC</title>
+    <meta charset="UTF-8">
+    <link rel="stylesheet" href="css/leaflet.css" />
+    <link rel="stylesheet" href="css/bootstrap.min.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+
+    <style>
+
+    body {
+    padding: 0;
+    margin: 0;
+    overflow: hidden;
+}
+html, body, {
+    height: 100%;
+}
+#map {
+  height: 40%;
+}
+.fr {
+  float: right;
+}
+.fl {
+  float: left;
+}
+.leaflet-control-attribution {
+  display:none;
+}
+
+
+    </style>
+  </head>
+  <body>
+    <div id="canvas" style="position: fixed; width:100%; height: 60%; bottom: 0px; overflow-y: scroll; overflow-x:hidden;"></div>
+    <div id="map"></div>
+    <script src="data/stops.js"></script>
+    <script src="data/routes.js"></script>
+    <script src="data/stop_times.js"></script>
+    <script src="data/trips.js"></script>
+    <script src="js/jquery-2.2.4.min.js"></script>
+    <script src="js/leaflet.js"></script>
+    <script src="js/bootstrap.min.js"></script>
+    <script>
+          /************************************************************
+          ******************    DO NOT USE "THIS."    *****************
+          **                                                         **
+          **  leafletJs can, and will, override context. That's      **
+          **  Simply because most functions are lauch from           **
+          **  leafletJs' Events... There is no magic.                **
+          **                                                         **
+          ************************************************************/
+
+      var ecoSail = {
+
+        bRemoveEmptyStop : true,          // hide stop with no route
+        strNoTime : 'No data',            // txt for "no data at all for that location"
+        strNoMoreTime : 'No more. Last was:',   // txt for "no more trip at your location"
+        iMaxTimePreviewPerStop : 3,
+        bDebugMode : true,                // Show / Hide debug informations
+
+        objMap : false,                   // leafletJs map object
+        objMapMarkersLayer : false,       // leafletJs Layer object
+        objMapLinesLayer : false,
+
+        objStops : false,                 // Stops Data
+        objStopsRef :{},
+        objTimeStop: false,               // Time stop Data
+        objTimeStopRef: {},               // Time stop Data "indexed"
+        objTrips : false,                 // Trips Data
+        objTripsRef : {},                 // Trips Data "indexed"
+        objRoutes : false,                // Route Data
+        objRoutesRef : {},                // Route Data "indexed"
+        objTimeStopByTripsId : {},        // TimeStopData by Trip
+        objActiveStops : {},              // Stops present witin flMaxRange
+
+        flMaxRange : 0.0005,               // Max range for stop.
+
+        objActualMapPosition : false,     // actual map position object
+        objPointIcon : false,
+        bIsMoving : false,
+
+
+        init : function initialisation() {
+          if(ecoSail.bDebugMode) { console.info('initialisation...'); }
+          if(ecoSail.bDebugMode) { console.info('Now: ' + ecoSail.fncGetTextDateFromNow()); }
+          ecoSail.fncRegisterRemoteData();
+          ecoSail.fncSetupMap();
+          // Remove previous marker on move
+          ecoSail.objMap.on('movestart', function (e) {
+
+           });
+
+           // Action sur déplacement de la carte
+           ecoSail.objMap.on('moveend', function (e) {
+               ecoSail.objMapMarkersLayer.clearLayers();
+               ecoSail.objActiveStops = [];
+               ecoSail.fncMoveMap(e);
+           });
+
+
+           ecoSail.objPointIcon = L.icon({
+               iconUrl: 'point.png',
+               iconSize:     [20, 20], // size of the icon
+               iconAnchor:   [10, 10], // point of the icon which will correspond to marker's location
+           });
+
+
+          // Add in a crosshair for the map
+          var crosshairIcon = L.icon({
+              iconUrl: 'center.png',
+              iconSize:     [20, 20], // size of the icon
+              iconAnchor:   [10, 10], // point of the icon which will correspond to marker's location
+          });
+          crosshair = new L.marker(ecoSail.objMap.getCenter(), {icon: crosshairIcon, clickable:false});
+          crosshair.addTo(ecoSail.objMap);
+          // Move the crosshair to the center of the map when the user pans
+          ecoSail.objMap.on('move', function(e) {
+              crosshair.setLatLng(ecoSail.objMap.getCenter());
+          });
+        },
+
+        fncMoveMap : function fncMoveMap(e) {
+
+          // Set flMaxRange from Zoom level
+          var iZoom = ecoSail.objMap.getZoom();
+          switch (iZoom) {
+            case 15: ecoSail.flMaxRange = 0.0075; break;
+            default: ecoSail.flMaxRange = 0.005; break;
+          }
+
+          var fcLon = 0;
+          var fcLat = 0;
+
+          ecoSail.flMaxRange = parseFloat(ecoSail.flMaxRange);
+          // Actualise map position
+          ecoSail.objActualMapPosition = ecoSail.objMap.getCenter();
+          // Build active marker
+          var fsLat = 0;
+          var fsLon = 0;
+          for(var i in ecoSail.objStops) {
+            fsLat = parseFloat(ecoSail.objStops[i].stop_lat);
+            fsLon = parseFloat(ecoSail.objStops[i].stop_lon);
+            if(
+              fsLat > parseFloat(ecoSail.objActualMapPosition.lat - ecoSail.flMaxRange ) &&
+              fsLat < parseFloat(ecoSail.objActualMapPosition.lat +  ecoSail.flMaxRange ) &&
+              fsLon > parseFloat(ecoSail.objActualMapPosition.lng - ecoSail.flMaxRange ) &&
+              fsLon < parseFloat(ecoSail.objActualMapPosition.lng +  ecoSail.flMaxRange ) &&
+              iZoom > 14
+            ) {
+              ecoSail.objActiveStops[ecoSail.objStops[i].stop_id] = ecoSail.objStops[i];
+              ecoSail.objActiveStops[ecoSail.objStops[i].stop_id].arrRoutes = {};
+              ecoSail.objActiveStops[ecoSail.objStops[i].stop_id].iActive = 0;
+              ecoSail.objActiveStops[ecoSail.objStops[i].stop_id].arrTimeStop = {};
+              ecoSail.objActiveStops[ecoSail.objStops[i].stop_id].arrTrips = [];
+            }
+          }
+          // activate only if zoom > 14
+          if(iZoom > 14) {
+            // build strop array
+            var arrStopIndexes = [];
+            for(var iStop in ecoSail.objActiveStops) {
+              arrStopIndexes.push(ecoSail.objActiveStops[iStop].stop_id);
+            }
+            // search every stopTime at stop
+            for(var iStopIndex in ecoSail.objTimeStop) {
+              // We got the time stop for markers on the map.
+              if(arrStopIndexes.indexOf(ecoSail.objTimeStop[iStopIndex].stop_id) > 0) {
+                // Get the route data for that specific stopTime and reference it
+                var tmpRoute =  ecoSail.objRoutesRef[ecoSail.objTripsRef[ecoSail.objTimeStop[iStopIndex].trip_id].route_id];
+                if(ecoSail.objActiveStops[ecoSail.objTimeStop[iStopIndex].stop_id].arrRoutes[tmpRoute.route_id] == undefined) {
+                  ecoSail.objActiveStops[ecoSail.objTimeStop[iStopIndex].stop_id].iActive = 1;
+                  ecoSail.objActiveStops[ecoSail.objTimeStop[iStopIndex].stop_id].arrRoutes[tmpRoute.route_id] = tmpRoute;
+                  ecoSail.objActiveStops[ecoSail.objTimeStop[iStopIndex].stop_id].arrRoutes[tmpRoute.route_id].arrTrips = [];
+                }
+                 // Put every new trip in the route.
+                if(ecoSail.objActiveStops[ecoSail.objTimeStop[iStopIndex].stop_id].arrRoutes[tmpRoute.route_id].arrTrips.indexOf(ecoSail.objTimeStop[iStopIndex].trip_id) < 0) {
+                  ecoSail.objActiveStops[ecoSail.objTimeStop[iStopIndex].stop_id].arrRoutes[tmpRoute.route_id].arrTrips.push(ecoSail.objTimeStop[iStopIndex].trip_id);
+                }
+              }
+            }
+          }
+          var objLocationSubArray = {};
+
+          for(var s in ecoSail.objActiveStops) {
+            if(!ecoSail.bRemoveEmptyStop || ecoSail.objActiveStops[s].iActive) {
+
+              /*var sHtml = ecoSail.objActiveStops[s].stop_id+'<br /><strong>'+ecoSail.objActiveStops[s].stop_name+'</strong><br>';
+              sHtml += '<p style="font-size: 150%;"">';
+              for(e in ecoSail.objActiveStops[s].arrRoutes) {
+                sHtml += '<span class="label label-default label" style="color: #'+ ecoSail.objActiveStops[s].arrRoutes[e].route_text_color +'; background: #'+ecoSail.objActiveStops[s].arrRoutes[e].route_color+'">' + ecoSail.objActiveStops[s].arrRoutes[e].route_short_name + '</span> '
+              }
+              sHtml += '</p><p><a href="javascript:ecoSail.fncDisplayResumeByLocation(\''+s+'\');" class="btn btn-default btn-block btn-lg">Horraires</a></p>';
+              */
+
+
+
+
+              var mMarker =  L.marker([ecoSail.objActiveStops[s].stop_lat, ecoSail.objActiveStops[s].stop_lon],{icon: ecoSail.objPointIcon, clickable:false}); // .bindPopup(sHtml);
+              ecoSail.objMapMarkersLayer.addLayer(mMarker);
+
+              objLocationSubArray[s] = {};
+              objLocationSubArray[s].fLat = ecoSail.objActiveStops[s].stop_lat;
+              objLocationSubArray[s].fLon = ecoSail.objActiveStops[s].stop_lon;
+              objLocationSubArray[s].iIndex = s;
+
+            }
+          }
+
+          var objNearestPoint = ecoSail.fncFindNearestLocation(
+            ecoSail.objActualMapPosition.lat,
+            ecoSail.objActualMapPosition.lng,
+            objLocationSubArray
+          )
+
+          if(!ecoSail.bIsMoving ) {
+            ecoSail.bIsMoving = true;
+            if(objNearestPoint) {
+              // centerView on point
+              ecoSail.objMap.setView([objNearestPoint.fLat,objNearestPoint.fLon],iZoom);
+              // Show informations..
+              ecoSail.fncDisplayResumeByLocation(objNearestPoint.iIndex);
+            }
+          } else {
+            ecoSail.bIsMoving = false;
+          }
+
+          ecoSail.objMapMarkersLayer.addTo(ecoSail.objMap);
+        },
+
+        fncRegisterRemoteData : function fncRegisterRemoteData() {
+          if(ecoSail.bDebugMode) { console.info('Parse transport database...'); }
+          ecoSail.objStops = JSON.parse(objStops);
+          ecoSail.objTimeStop = JSON.parse(objTimeStop);
+          ecoSail.objTrips = JSON.parse(objTrips);
+          ecoSail.objRoutes = JSON.parse(objRoutes);
+
+          for(var d in ecoSail.objTimeStop) {
+            ecoSail.objTimeStopRef[ecoSail.objTimeStop[d].trip_id + '-' + ecoSail.objTimeStop[d].stop_id] = ecoSail.objTimeStop[d];
+            if(ecoSail.objTimeStopByTripsId[ecoSail.objTimeStop[d].trip_id] == undefined) {
+              ecoSail.objTimeStopByTripsId[ecoSail.objTimeStop[d].trip_id] = [];
+            }
+            ecoSail.objTimeStopByTripsId[ecoSail.objTimeStop[d].trip_id].push(ecoSail.objTimeStop[d]);
+          }
+
+          for(var d in ecoSail.objStops) {
+            ecoSail.objStopsRef[ecoSail.objStops[d].stop_id] = ecoSail.objStops[d];
+          }
+
+          for(var d in ecoSail.objTrips) {
+            ecoSail.objTripsRef[ecoSail.objTrips[d].trip_id] = ecoSail.objTrips[d];
+          }
+          for(var d in ecoSail.objRoutes) {
+            ecoSail.objRoutesRef[ecoSail.objRoutes[d].route_id] = ecoSail.objRoutes[d];
+          }
+
+          if(ecoSail.bDebugMode) { console.info('done.'); }
+        },
+
+        // Init leafletJs and layer
+        fncSetupMap : function fncSetupMap() {
+          // Init Base map
+          if(ecoSail.bDebugMode) { console.info('Create leafletJs Map and base layer...'); }
+          ecoSail.objMap = L.map('map').setView([46.7606, -71.2949], 16);
+
+          // Load local TileLayer
+          L.tileLayer('tiles/{z}/{x}/{y}.png', {
+            attribution: '--',
+            minZoom: 14,
+            maxZoom: 16
+          }).addTo(ecoSail.objMap);
+
+          //Create base marker layer
+          ecoSail.objMapMarkersLayer = new L.FeatureGroup();
+          ecoSail.objMapLinesLayer = new L.FeatureGroup();
+
+          if(ecoSail.bDebugMode) { console.info('done.'); }
+        },
+
+
+
+        fncFindNearestLocation : function fncFindNearestLocation(fLat,fLon,objList) {
+          var objScores = {};
+          var arrScores = [];
+          for(var i in objList) {
+            var iScore = Math.abs(objList[i].fLat - fLat) + Math.abs(objList[i].fLon - fLon);
+            arrScores.push(iScore);
+            objScores[iScore] = objList[i];
+          }
+          if(arrScores.length > 0) {
+            arrScores.sort(ecoSail.fncSortNumber);
+            return objScores[arrScores[0]];
+          } else {
+            return false;
+          }
+
+        },
+        /*
+          s = ecoSail.objActiveStops index
+          r = ecoSail.objActiveStops[x].arrRoutes index
+        */
+        fncDisplayAllTripsForARouteOnALocation : function fncDisplayAllTripsForALocation(s,r) {
+          var sHtml = '';
+          sHtml += ecoSail.fncGetStopHeaderHtml(s);
+
+          sHtml += '<div class="container-fluid" style="padding:59px 0px 0px 0px;margin: 0px;"><div class="row"><div class="col-md-4">';
+          sHtml += '<table class="table table-striped" style="">';
+
+
+          sHtml += '<tr style="color: #'+ ecoSail.objActiveStops[s].arrRoutes[r].route_text_color +'; background: #'+ecoSail.objActiveStops[s].arrRoutes[r].route_color+'"><td><h1 style="padding:0px; margin:0px; color: #'+ ecoSail.objActiveStops[s].arrRoutes[r].route_text_color +';">'+ecoSail.objActiveStops[s].arrRoutes[r].route_short_name;
+
+          sHtml += '</h1><small>'+ecoSail.objActiveStops[s].arrRoutes[r].route_desc+'</small></td><td onclick="ecoSail.fncDisplayResumeByLocation('+s+');"><span style="padding: 20px; font-size:200%:" class="glyphicon glyphicon-chevron-left" aria-hidden="true"></span></strong></td></tr>';
+
+
+
+          var arrTimeIndex =  [];
+          var objTimeData =  {};
+
+
+
+
+          if(ecoSail.objActiveStops[s].arrRoutes[r].arrTrips !== undefined) {
+            for(var t in ecoSail.objActiveStops[s].arrRoutes[r].arrTrips) {
+              if(ecoSail.objTimeStopRef[ecoSail.objActiveStops[s].arrRoutes[r].arrTrips[t] + '-' + ecoSail.objActiveStops[s].stop_id] !== undefined)
+              {
+                var sTimeTmp = ecoSail.objTimeStopRef[ecoSail.objActiveStops[s].arrRoutes[r].arrTrips[t] + '-' + ecoSail.objActiveStops[s].stop_id].departure_time;
+                var iTimeScoreTmp = ecoSail.fncGetScoreFromTextTime(sTimeTmp);
+                if(arrTimeIndex.indexOf(iTimeScoreTmp) < 0) {
+                  arrTimeIndex.push(iTimeScoreTmp);
+                  objTimeData[iTimeScoreTmp] = {};
+                  objTimeData[iTimeScoreTmp].sTime = ecoSail.objTimeStopRef[ecoSail.objActiveStops[s].arrRoutes[r].arrTrips[t] + '-' + ecoSail.objActiveStops[s].stop_id].departure_time.substring(5,0);
+                  objTimeData[iTimeScoreTmp].iTripId = ecoSail.objActiveStops[s].arrRoutes[r].arrTrips[t];
+                  objTimeData[iTimeScoreTmp].iRoute = r;
+                }
+              }
+            }
+          }
+          arrTimeIndex.sort(ecoSail.fncSortNumber);
+
+          if(arrTimeIndex.length > 0)
+          {
+            for(var iIndex in arrTimeIndex) {
+              //console.info(arrTimeIndex[iIndex]);
+
+                if(ecoSail.fncGetScoreFromTextTime(ecoSail.fncGetTextDateFromNow()) < arrTimeIndex[iIndex]) {
+                  sHtml += '<tr style=""><td onclick="ecoSail.fncDisplayTripByIdAndRouteIdAndStopIndex(\''+s+'\',\''+objTimeData[arrTimeIndex[iIndex]].iRoute+'\',\''+objTimeData[arrTimeIndex[iIndex]].iTripId+'\');" colspan="2" style="padding-top:15px; padding-bottom:15px;"><center><span>'+objTimeData[arrTimeIndex[iIndex]].sTime+'</span></center></td></tr>';
+                } else {
+                  sHtml += '<tr style=""><td onclick="ecoSail.fncDisplayTripByIdAndRouteIdAndStopIndex(\''+s+'\',\''+objTimeData[arrTimeIndex[iIndex]].iRoute+'\',\''+objTimeData[arrTimeIndex[iIndex]].iTripId+'\');" colspan="2" style="padding-top:15px; padding-bottom:15px;"><center><span class="text-muted">'+objTimeData[arrTimeIndex[iIndex]].sTime+'</span></center></td></tr>';
+                }
+
+            }
+          } else {
+            bActive = false;
+            sHtml += '<tr><td><center>'+ecoSail.strNoTime+'</center></td></tr>';
+          }
+          sHtml += '</table>';
+          sHtml += '</div></div></div>';
+          $('#canvas').html(sHtml);
+        },
+
+        fncDisplayTripByIdAndRouteIdAndStopIndex : function fncDisplayTripByIdAndRouteIdAndStopIndex(iStopIndex,iRoute, iTipId) {
+          var sHtml = '';
+          ecoSail.objMapLinesLayer.clearLayers();
+          if(ecoSail.objTimeStopByTripsId[iTipId] !== undefined) {
+
+            sHtml += '<div class="container-fluid" style="position: fixed; height: 60px; z-index: 999; background: #fff; width: 100%; margin-top: -1px;"><div class="row"><div class="col-md-12">';
+            sHtml += '<h4><strong>' + ecoSail.objActiveStops[iStopIndex].arrRoutes[iRoute].route_short_name + '</strong> '+ ecoSail.objActiveStops[iStopIndex].arrRoutes[iRoute].route_desc + '</h4>';
+            sHtml += '</div></div></div>';
+
+            sHtml += '<div class="container-fluid" style="padding:59px 0px 0px 0px;margin: 0px;"><div class="row"><div class="col-md-4">';
+            sHtml += '<table class="table table-striped" style="">';
+            var pathLine = L.polyline([]).addTo(ecoSail.objMapLinesLayer);
+
+              for(var t in ecoSail.objTimeStopByTripsId[iTipId]) {
+                pathLine.addLatLng([
+                  ecoSail.objStopsRef[ecoSail.objTimeStopByTripsId[iTipId][t].stop_id].stop_lat,
+                  ecoSail.objStopsRef[ecoSail.objTimeStopByTripsId[iTipId][t].stop_id].stop_lon
+                ]);
+                sHtml += '<tr style="padding-top:15px; padding-bottom:15px;"><td onclick=""><center><span>'+ecoSail.objTimeStopByTripsId[iTipId][t].departure_time.substring(5,0) +'</span></center></td><td>'+ecoSail.objStopsRef[ecoSail.objTimeStopByTripsId[iTipId][t].stop_id].stop_name+'</td></tr>';
+              }
+
+
+              ecoSail.objMapLinesLayer.addTo(ecoSail.objMap);
+          }
+
+          sHtml += '</table>';
+          sHtml += '</div></div></div>';
+
+          $('#canvas').html(sHtml);
+        },
+
+        fncGetStopHeaderHtml : function fncGetStopHeaderHtml(s) {
+          var sHtml = '';
+          sHtml += '<div class="container-fluid" style="position: fixed; height: 60px; z-index: 999; background: #fff; width: 100%; margin-top: -1px;"><div class="row"><div class="col-md-12">';
+          sHtml += '<h4>'+ ecoSail.objActiveStops[s].stop_id + '<br><strong>' + ecoSail.objActiveStops[s].stop_name + '</strong></h4>';
+          sHtml += '</div></div></div>';
+          return sHtml;
+        },
+
+        fncDisplayResumeByLocation : function fncDisplayResumeByLocation(s) {
+
+          var sHtml = '';
+
+          sHtml += ecoSail.fncGetStopHeaderHtml(s);
+
+          sHtml += '<div class="container-fluid" style="padding:59px 0px 0px 0px;margin: 0px;"><div class="row"><div class="col-md-4">';
+          sHtml += '<table class="table table-striped" style="">';
+
+          var sActiveHtml = '';
+          var sInactiveHtml = '';
+
+          for(var r in ecoSail.objActiveStops[s].arrRoutes) {
+
+            var sHtmlList = '';
+
+            var bActive = true;
+
+
+            var arrTimeIndex =  [];
+            var objTimeData =  {};
+
+            sHtmlList += '<tr style="color: #'+ ecoSail.objActiveStops[s].arrRoutes[r].route_text_color +'; background: #'+ecoSail.objActiveStops[s].arrRoutes[r].route_color+'"><td><h1 style="padding:0px; margin:0px; color: #'+ ecoSail.objActiveStops[s].arrRoutes[r].route_text_color +';">'+ecoSail.objActiveStops[s].arrRoutes[r].route_short_name;
+
+
+            if(ecoSail.objActiveStops[s].arrRoutes[r].arrTrips !== undefined) {
+              for(var t in ecoSail.objActiveStops[s].arrRoutes[r].arrTrips) {
+                if(ecoSail.objTimeStopRef[ecoSail.objActiveStops[s].arrRoutes[r].arrTrips[t] + '-' + ecoSail.objActiveStops[s].stop_id] !== undefined)
+                {
+                  var sTimeTmp = ecoSail.objTimeStopRef[ecoSail.objActiveStops[s].arrRoutes[r].arrTrips[t] + '-' + ecoSail.objActiveStops[s].stop_id].departure_time;
+                  var iTimeScoreTmp = ecoSail.fncGetScoreFromTextTime(sTimeTmp);
+                  if(arrTimeIndex.indexOf(iTimeScoreTmp) < 0) {
+                    arrTimeIndex.push(iTimeScoreTmp);
+                    objTimeData[iTimeScoreTmp] = ecoSail.objTimeStopRef[ecoSail.objActiveStops[s].arrRoutes[r].arrTrips[t] + '-' + ecoSail.objActiveStops[s].stop_id].departure_time.substring(5,0);
+                  }
+                }
+              }
+            }
+            arrTimeIndex.sort(ecoSail.fncSortNumber);
+
+            // get next 3 stop...
+            var iCurrent = 0;
+            var sTimes = '';
+
+            if(arrTimeIndex.length > 0)
+            {
+              for(var iIndex in arrTimeIndex) {
+                //console.info(arrTimeIndex[iIndex]);
+
+                if(ecoSail.iMaxTimePreviewPerStop > iCurrent) {
+                  if(ecoSail.fncGetScoreFromTextTime(ecoSail.fncGetTextDateFromNow()) < arrTimeIndex[iIndex]) {
+                    sTimes += objTimeData[arrTimeIndex[iIndex]] + ' ';
+                    iCurrent++;
+                  }
+                }
+              }
+            } else {
+              bActive = false;
+              sTimes = ecoSail.strNoTime;
+            }
+            if(sTimes == '') {
+              bActive = false;
+              sTimes = ecoSail.strNoMoreTime+ ' ' + objTimeData[arrTimeIndex[arrTimeIndex.length - 1]];
+            }
+
+
+            sHtmlList += '</h1><small>'+ecoSail.objActiveStops[s].arrRoutes[r].route_desc+'</small></td><td onclick="ecoSail.fncDisplayAllTripsForARouteOnALocation('+s+','+r+');"><strong>'+ sTimes +'</strong></td></tr>';
+
+            if(bActive) {
+              sActiveHtml += sHtmlList;
+            } else {
+              sInactiveHtml += sHtmlList;
+            }
+          }
+
+
+
+          sHtml += sActiveHtml + sInactiveHtml + '</table>';
+
+
+
+          sHtml += '</div></div></div>';
+
+
+          $('#canvas').html(sHtml);
+          $('#canvas').show();
+        },
+        fncGetTextDateFromNow : function fncGetTextDateFromNow() {
+          var d = new Date();
+
+          var sHour = d.getHours() + "";
+          var sMinute = d.getMinutes() + "";
+
+          if(sHour.length == 1) { sHour = '0' + sHour; }
+          if(sMinute.length == 1) { sMinute = '0' + sMinute; }
+
+          return sHour + ':' + sMinute;
+
+        },
+        fncGetScoreFromTextTime : function fncGetScoreFromTextTime(str) {
+          // hh:mm
+          var iH = parseInt(str.substring(0,2));
+          var iM = parseInt(str.substring(5,3));
+          return (iH * 60) + iM;
+        },
+        fncSortNumber : function fncSortNumber(a,b) {
+          return a - b;
+        }
+
+      }
+
+
+
+
+            function getEachTripsOfARoute(tmp_route_id) {
+              var oTmp = [];
+              for(var e in objTrips) {
+                if(objTrips[e].route_id == tmp_route_id) {
+                  oTmp.push(objTrips[e].trip_id);
+                }
+              }
+              return oTmp;
+            }
+
+            function keysrt(key,desc) {
+              return function(a,b){
+               return desc ? ~~(a[key] < b[key]) : ~~(a[key] > b[key]);
+              }
+            }
+
+
+
+      ecoSail.init();
+
+
+
+
+      /*     map.on('click', function(e) {
+
+
+                  //console.info(e.latlng.lat+"', '"+e.latlng.lng);
+
+            });*/
+
+    </script>
+  </body>
+
+
+</html>
